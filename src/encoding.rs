@@ -1,4 +1,4 @@
-mod cp037;
+pub(crate) mod cp037;
 
 pub trait SBCS {
     fn from_unicode(ch: char) -> Option<u8>;

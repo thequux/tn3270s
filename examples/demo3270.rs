@@ -2,6 +2,7 @@ use structopt::StructOpt;
 use std::time::Duration;
 
 use tn3270s::tn3270;
+use tn3270s::tn3270::stream::WriteOrder::SetBufferAddress;
 
 #[derive(StructOpt)]
 pub struct Cli {
@@ -12,16 +13,58 @@ pub struct Cli {
 
 }
 
+//      _~^~^~_
+//  \) /  o o  \ (/
+//    '_   ¬   _'
+//    / '-----' \
+//  1234567890123456
+
+static rust_logo: [&'static str; 4] = [
+  r#"     _~^~^~_     "#,
+  r#" \) /  o o  \ (/ "#,
+  r#"   '_   ¬   _'   "#,
+  r#"   / '-----' \   "#,
+];
+
 fn run(mut session: tn3270::Session) -> anyhow::Result<()> {
     use tn3270::stream::*;
-    let mut record = WriteCommand::new(WriteCommandCode::Write, WCC::RESET | WCC::KBD_RESTORE);
     let bufsz = BufferAddressCalculator { width: 80, height: 24 };
-    record.set_buffer_address(0)
-        .erase_unprotected_to_address(bufsz.encode_address(79, 23))
-        .set_buffer_address(bufsz.encode_address(31,1))
-        .set_attribute(ExtendedFieldAttribute::ForegroundColor(Color::Red))
-        .send_text("Hello from Rust!");
-    session.send_record(record)?;
+    let mut record = WriteCommand {
+        command: WriteCommandCode::Write,
+        wcc: WCC::RESET | WCC::KBD_RESTORE | WCC::RESET_MDT,
+        orders: vec![
+            WriteOrder::SetBufferAddress(0),
+            WriteOrder::EraseUnprotectedToAddress(bufsz.last_address()),
+            WriteOrder::SetBufferAddress(bufsz.encode_address(1, 31)),
+            WriteOrder::StartFieldExtended(FieldAttribute::PROTECTED, vec![
+                // ExtendedFieldAttribute::ForegroundColor(Color::Red),
+            ]),
+            WriteOrder::SendText("Hello from Rust!".into()),
+            WriteOrder::SetBufferAddress(bufsz.encode_address(8, 21)),
+            WriteOrder::StartFieldExtended(FieldAttribute::INTENSE_SELECTOR_PEN_DETECTABLE, vec![]),
+            WriteOrder::SendText("        ".into()),
+            WriteOrder::StartField(FieldAttribute::PROTECTED),
+            WriteOrder::SetBufferAddress(bufsz.encode_address(8, 10)),
+            WriteOrder::StartFieldExtended(FieldAttribute::PROTECTED, vec![
+                ExtendedFieldAttribute::ForegroundColor(Color::Turquoise),
+            ]),
+            WriteOrder::SendText("Name:".into()),
+        ],
+    };
+
+    for (i, line) in rust_logo.iter().enumerate() {
+        record.orders.push(WriteOrder::SetBufferAddress(bufsz.encode_address(3+i as u16, 31)));
+        record.orders.push(WriteOrder::StartFieldExtended(FieldAttribute::PROTECTED, vec![
+            ExtendedFieldAttribute::ForegroundColor(Color::Red),
+        ]));
+        record.orders.push(WriteOrder::SendText((*line).into()));
+    }
+    session.send_record(&record)?;
+    session.send_record(&WriteCommand{
+        command: WriteCommandCode::Write,
+        wcc: WCC::RESET_MDT | WCC::KBD_RESTORE,
+        orders: vec![],
+    })?;
 
     let record = session.receive_record(None)?;
     if let Some(record) = record {
@@ -31,7 +74,7 @@ fn run(mut session: tn3270::Session) -> anyhow::Result<()> {
     }
 
 
-    std::thread::sleep(Duration::from_secs(60));
+    std::thread::sleep(Duration::from_secs(5));
     Ok(())
 }
 

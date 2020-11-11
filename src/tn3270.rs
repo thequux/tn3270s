@@ -166,7 +166,7 @@ impl Session {
             self.stream.set_nonblocking(true)?;
             while len != 0 {
                 let events = self.parser.receive(&buf[..len]);
-                self.process_events(events);
+                self.process_events(events)?;
                 len = match self.stream.read(buf.as_mut_slice()) {
                     Ok(len) => len,
                     Err(err) if err.kind() == std::io::ErrorKind::WouldBlock => 0,

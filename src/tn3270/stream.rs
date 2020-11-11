@@ -1,7 +1,15 @@
 use bitflags::bitflags;
 use std::io::Write;
+use std::convert::TryFrom;
+use snafu::Snafu;
 
-static WCC_TRANS: [u8; 64] = [
+#[derive(Clone, Debug, Snafu)]
+pub enum StreamFormatError {
+    #[snafu(display("Invalid AID: {:02x}", aid))]
+    InvalidAID { aid: u8, }
+}
+
+const WCC_TRANS: [u8; 64] = [
     0x40, 0xC1, 0xC2, 0xC3, 0xC4, 0xC5, 0xC6, 0xC7,
     0xC8, 0xC9, 0x4A, 0x4B, 0x4C, 0x4D, 0x4E, 0x4F,
     0x50, 0xD1, 0xD2, 0xD3, 0xD4, 0xD5, 0xD6, 0xD7,
@@ -57,7 +65,9 @@ pub trait OutputRecord {
 }
 
 pub struct WriteCommand {
-    data: Vec<u8>,
+    pub command: WriteCommandCode,
+    pub wcc: WCC,
+    pub orders: Vec<WriteOrder>,
 }
 
 #[derive(Copy, Clone, Debug)]
@@ -214,6 +224,18 @@ impl ExtendedFieldAttribute {
             ExtendedFieldAttribute::FieldValidation(v) => (0xC1, v.bits()),
         }
     }
+
+    fn encode_into(&self, output: &mut Vec<u8>) {
+        let (typ, val) = self.encoded();
+        output.extend_from_slice(&[typ, val]);
+    }
+
+}
+
+impl Into<ExtendedFieldAttribute> for &ExtendedFieldAttribute {
+    fn into(self) -> ExtendedFieldAttribute {
+        *self
+    }
 }
 
 #[derive(Copy, Clone, Debug)]
@@ -223,118 +245,226 @@ pub struct BufferAddressCalculator {
 }
 
 impl BufferAddressCalculator {
-    pub fn encode_address(self, x: u16, y: u16) -> u16 {
+    pub fn encode_address(self, y: u16, x: u16) -> u16 {
         self.width * y + x
+    }
+
+    pub fn last_address(self) -> u16 {
+        self.width * self.height - 1
+    }
+}
+
+#[derive(Clone, Debug)]
+pub enum WriteOrder {
+    StartField(FieldAttribute),
+    StartFieldExtended(FieldAttribute, Vec<ExtendedFieldAttribute>),
+    SetBufferAddress(u16),
+    SetAttribute(ExtendedFieldAttribute),
+    ModifyField(Vec<ExtendedFieldAttribute>),
+    InsertCursor(u16),
+    ProgramTab,
+    RepeatToAddress(u16, char),
+    EraseUnprotectedToAddress(u16),
+    GraphicEscape(u8),
+    SendText(String),
+}
+
+impl WriteOrder {
+
+    pub fn serialize(&self, output: &mut Vec<u8>) {
+        match self {
+            WriteOrder::StartField(attr) => output.extend_from_slice(&[0x1D, attr.bits()]),
+            WriteOrder::StartFieldExtended(attr, rest) => {
+                output.extend_from_slice(&[0x29, rest.len() as u8 + 1]);
+                ExtendedFieldAttribute::FieldAttribute(*attr).encode_into(&mut* output);
+                for attr in rest {
+                    attr.encode_into(&mut *output);
+                }
+            }
+            WriteOrder::SetBufferAddress(addr) => output.extend_from_slice(&[0x11, (addr >> 8) as u8, (addr & 0xff) as u8]),
+            WriteOrder::SetAttribute(attr) => {
+                let (typ, val) = attr.encoded();
+                output.extend_from_slice(&[0x28, typ, val]);
+            }
+            WriteOrder::ModifyField(attrs) => {
+                output.extend_from_slice(&[0x2C, attrs.len() as u8]);
+                for attr in attrs {
+                    attr.encode_into(&mut* output);
+                }
+            }
+            WriteOrder::InsertCursor(addr) => output.extend_from_slice(&[0x11, (addr >> 8) as u8, (addr & 0xff) as u8]),
+            WriteOrder::ProgramTab => output.push(0x05),
+            WriteOrder::RepeatToAddress(addr, ch) => {
+                // TODO: COme up with a way to allow graphic escape here
+                output.extend_from_slice(&[0x3C, (addr >> 8) as u8, (addr & 0xff) as u8, crate::encoding::cp037::ENCODE_TBL[*ch as usize]])
+            }
+            WriteOrder::EraseUnprotectedToAddress(addr) => {
+                output.extend_from_slice(&[0x12, (addr >> 8) as u8, (addr & 0xff) as u8])
+            }
+            WriteOrder::GraphicEscape(ch) => output.extend_from_slice(&[0x08, *ch]),
+            WriteOrder::SendText(text) => {
+                output.extend(crate::encoding::to_cp037(text.chars()));
+            }
+        }
     }
 }
 
 impl WriteCommand {
-    pub fn new(command: WriteCommandCode, wcc: WCC) -> Self {
-        WriteCommand {
-            data: vec![command.to_command_code(), wcc.to_ascii_compat(),  ]
+    pub fn serialize(&self, output: &mut Vec<u8>) {
+        output.push(self.command.to_command_code());
+        output.push(self.wcc.to_ascii_compat());
+        for order in self.orders.iter() {
+            order.serialize(&mut *output);
         }
-    }
-
-    pub fn start_field(&mut self, fa: FieldAttribute) -> &mut Self {
-        self.data.push(0x1D);
-        self.data.push(fa.bits());
-        self
-    }
-
-    pub fn start_field_extended(&mut self, fa: FieldAttribute, attrs: impl IntoIterator<Item=ExtendedFieldAttribute>) -> &mut Self {
-        self.data.push(0x29);
-        let nattr_pos = self.data.len();
-        self.data.push(0);
-        let mut i = 1;
-        self.data.push(0xC0);
-        self.data.push(make_ascii_translatable(fa.bits()));
-
-        for (typ, value) in attrs.into_iter().map(ExtendedFieldAttribute::encoded) {
-            self.data.push(typ);
-            self.data.push(value);
-            i += 1;
-        }
-        self.data[nattr_pos] = i;
-        self
-    }
-
-    pub fn set_buffer_address(&mut self, address: u16) -> &mut Self {
-        self.data.push(0x11);
-        self.data.push((address >> 8) as u8);
-        self.data.push((address & 0xFF) as u8);
-        return self;
-    }
-
-    pub fn set_attribute(&mut self, attr: ExtendedFieldAttribute) -> &mut Self {
-        let (typ, val) = attr.encoded();
-        self.data.extend_from_slice(&[0x28, typ, val]);
-        self
-    }
-
-    pub fn modify_field(&mut self, attrs: impl IntoIterator<Item=ExtendedFieldAttribute>) -> &mut Self {
-        self.data.push(0x2C);
-        let nattr_pos = self.data.len();
-        self.data.push(0);
-        let mut i = 0;
-        for (typ, value) in attrs.into_iter().map(ExtendedFieldAttribute::encoded) {
-            self.data.push(typ);
-            self.data.push(value);
-            i += 1;
-        }
-        self.data[nattr_pos] = i;
-        self
-    }
-
-    fn encode_address(&mut self, address: u16) {
-        self.data.push((address >> 8) as u8);
-        self.data.push((address & 0xFF) as u8);
-
-    }
-
-    pub fn insert_cursor(&mut self, address: u16) -> &mut Self {
-        self.data.push(0x13);
-        self.encode_address(address);
-        return self;
-    }
-
-    pub fn program_tab(&mut self) -> &mut Self {
-        self.data.push(0x05);
-        self
-    }
-
-    // This must be followed by either a character or a graphic escape
-    pub fn repeat_to_address(&mut self, address: u16) -> &mut Self {
-        self.data.push(0x3C);
-        self.encode_address(address);
-        self
-    }
-
-    pub fn erase_unprotected_to_address(&mut self, address: u16) -> &mut Self {
-        self.data.push(0x12);
-        self.encode_address(address);
-        self
-    }
-
-    pub fn graphic_escape(&mut self, charcode: u8) -> &mut Self {
-        self.data.push(0x08);
-        self.data.push(charcode);
-        self
-    }
-
-    pub fn send_text(&mut self, data: &str) -> &mut Self {
-        self.data.extend(crate::encoding::to_cp037(data.chars()));
-        self
     }
 }
 
-impl AsRef<[u8]> for WriteCommand {
-    fn as_ref(&self) -> &[u8] {
-        self.data.as_slice()
-    }
-}
 
-impl Into<Vec<u8>> for WriteCommand {
+impl Into<Vec<u8>> for &WriteCommand {
     fn into(self) -> Vec<u8> {
-        self.data
+        let mut result = vec![];
+        self.serialize(&mut result);
+        result
+    }
+}
+
+#[repr(u8)]
+pub enum AID {
+    NoAIDGenerated,
+    NoAIDGeneratedPrinter,
+    StructuredField,
+    ReadPartition,
+    TriggerAction,
+    SysReq,
+    PF1,
+    PF2,
+    PF3,
+    PF4,
+    PF5,
+    PF6,
+    PF7,
+    PF8,
+    PF9,
+    PF10,
+    PF11,
+    PF12,
+    PF13,
+    PF14,
+    PF15,
+    PF16,
+    PF17,
+    PF18,
+    PF19,
+    PF20,
+    PF21,
+    PF22,
+    PF23,
+    PF24,
+    PA1,
+    PA2,
+    PA3,
+    Clear,
+    ClearPartition,
+    Enter,
+    SelectorPenAttention,
+    MagReaderOperatorID,
+    MagReaderNumber,
+}
+
+impl From<AID> for u8 {
+    fn from(aid: AID) -> u8 {
+        use self::AID::*;
+        match aid {
+            NoAIDGenerated => 0x60,
+            NoAIDGeneratedPrinter => 0xE8,
+            StructuredField => 0x88,
+            ReadPartition => 0x61,
+            TriggerAction => 0x7f,
+            SysReq => 0xf0,
+            PF1 => 0xF1,
+            PF2 => 0xF2,
+            PF3 => 0xF3,
+            PF4 => 0xF4,
+            PF5 => 0xF5,
+            PF6 => 0xF6,
+            PF7 => 0xF7,
+            PF8 => 0xF8,
+            PF9 => 0xF9,
+            PF10 => 0x7A,
+            PF11 => 0x7B,
+            PF12 => 0x7C,
+            PF13 => 0xC1,
+            PF14 => 0xC2,
+            PF15 => 0xC3,
+            PF16 => 0xC4,
+            PF17 => 0xC5,
+            PF18 => 0xC6,
+            PF19 => 0xC7,
+            PF20 => 0xC8,
+            PF21 => 0xC9,
+            PF22 => 0x4A,
+            PF23 => 0x4B,
+            PF24 => 0x4C,
+            PA1 => 0x6C,
+            PA2 => 0x6E,
+            PA3 => 0x6B,
+            Clear => 0x6D,
+            ClearPartition => 0x6A,
+            Enter => 0x7D,
+            SelectorPenAttention => 0x7E,
+            MagReaderOperatorID => 0xE6,
+            MagReaderNumber => 0xE7,
+        }
+    }
+}
+
+
+impl TryFrom<u8> for AID {
+    type Error = StreamFormatError;
+
+    fn try_from(aid: u8) -> Result<Self, Self::Error> {
+        use self::AID::*;
+        Ok(match aid {
+            0x60 => NoAIDGenerated,
+            0xE8 => NoAIDGeneratedPrinter,
+            0x88 => StructuredField,
+            0x61 => ReadPartition,
+            0x7f => TriggerAction,
+            0xf0 => SysReq,
+            0xF1 => PF1,
+            0xF2 => PF2,
+            0xF3 => PF3,
+            0xF4 => PF4,
+            0xF5 => PF5,
+            0xF6 => PF6,
+            0xF7 => PF7,
+            0xF8 => PF8,
+            0xF9 => PF9,
+            0x7A => PF10,
+            0x7B => PF11,
+            0x7C => PF12,
+            0xC1 => PF13,
+            0xC2 => PF14,
+            0xC3 => PF15,
+            0xC4 => PF16,
+            0xC5 => PF17,
+            0xC6 => PF18,
+            0xC7 => PF19,
+            0xC8 => PF20,
+            0xC9 => PF21,
+            0x4A => PF22,
+            0x4B => PF23,
+            0x4C => PF24,
+            0x6C => PA1,
+            0x6E => PA2,
+            0x6B => PA3,
+            0x6D => Clear,
+            0x6A => ClearPartition,
+            0x7D => Enter,
+            0x7E => SelectorPenAttention,
+            0xE6 => MagReaderOperatorID,
+            0xE7 => MagReaderNumber,
+            _ => return Err(StreamFormatError::InvalidAID { aid }),
+        })
     }
 }
