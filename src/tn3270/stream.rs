@@ -2,8 +2,6 @@ use bitflags::bitflags;
 use std::io::Write;
 use std::convert::{TryFrom, TryInto};
 use snafu::{Snafu, ensure};
-use hex::encode;
-use std::fs::read_to_string;
 
 #[derive(Clone, Debug, Snafu)]
 pub enum StreamFormatError {
@@ -73,6 +71,7 @@ pub trait OutputRecord {
     fn write_to(&self, writer: &mut dyn Write) -> std::io::Result<()>;
 }
 
+#[derive(Debug, Clone)]
 pub struct WriteCommand {
     pub command: WriteCommandCode,
     pub wcc: WCC,
@@ -330,6 +329,10 @@ impl BufferAddressCalculator {
 
     pub fn last_address(self) -> u16 {
         self.width * self.height - 1
+    }
+
+    pub fn decode_address(self, addr: u16) -> (u16, u16) {
+        (addr / self.width, addr % self.width)
     }
 }
 

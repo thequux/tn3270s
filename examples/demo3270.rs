@@ -3,6 +3,8 @@ use std::time::Duration;
 
 use tn3270s::tn3270;
 use tn3270s::tn3270::stream::WriteOrder::SetBufferAddress;
+use tn3270s::tn3270::screen::{Screen, Field, Address, FieldData};
+use tn3270s::tn3270::stream::{ExtendedFieldAttribute, FieldAttribute};
 
 #[derive(StructOpt)]
 pub struct Cli {
@@ -26,7 +28,7 @@ static rust_logo: [&'static str; 4] = [
   r#"   / '-----' \   "#,
 ];
 
-fn run(mut session: tn3270::Session) -> anyhow::Result<()> {
+fn intro_screen(session: &mut tn3270::Session) -> anyhow::Result<()> {
     use tn3270::stream::*;
     let bufsz = BufferAddressCalculator { width: 80, height: 24 };
     let mut record = WriteCommand {
@@ -76,20 +78,47 @@ fn run(mut session: tn3270::Session) -> anyhow::Result<()> {
     } else {
         eprintln!("No record");
     }
+    Ok(())
+}
 
-    session.send_record(&WriteCommand{
-        command: WriteCommandCode::Write,
-        wcc: WCC::RESET_MDT,
-        orders: vec![
-            WriteOrder::SetBufferAddress(bufsz.encode_address(8,21)),
-            WriteOrder::ModifyField(vec![
-                ExtendedFieldAttribute::FieldAttribute(FieldAttribute::PROTECTED),
-            ]),
+
+fn hlapi_demo(session: &mut tn3270::Session) -> anyhow::Result<()> {
+    let mut name = "        ".to_string();
+    let mut passwd = "        ".to_string();
+
+    let result = Screen {
+        fields: vec![
+            Field::at(1, 32).ro_text("Please enter your data"),
+            Field::at(3, 10).ro_text("Name: "),
+            Field::at(3, 20).rw_text(&mut name),
+            Field::at(4, 10).ro_text("Password: "),
+            Field::at(4, 20).rw_text(&mut passwd)
+                .with_attr(ExtendedFieldAttribute::FieldAttribute(FieldAttribute::NON_DISPLAY)),
         ],
-    })?;
+    }.present(&mut *session)?;
 
+    let aid = format!("{:?}", result.aid);
+    Screen {
+        fields: vec![
+          Field::at(1, 32).ro_text("Your data"),
+          Field::at(3, 10).ro_text("Name: "),
+          Field::at(3, 20).ro_text(name.as_str()),
+          Field::at(4, 10).ro_text("Password: "),
+          Field::at(4, 20).ro_text(passwd.as_str()),
+            Field::at(5, 10).ro_text("You pressed: "),
+            Field::at(5, 25).ro_text(aid.as_str()),
+            Field::at(23, 32).ro_text("Press ENTER to exit"),
+        ],
+    }.present(&mut *session)?;
 
-    std::thread::sleep(Duration::from_secs(50));
+    Ok(())
+}
+
+fn run(mut session: tn3270::Session) -> anyhow::Result<()> {
+    intro_screen(&mut session);
+    hlapi_demo(&mut session);
+
+    // std::thread::sleep(Duration::from_secs(50));
     Ok(())
 }
 

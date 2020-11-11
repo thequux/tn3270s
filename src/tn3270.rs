@@ -12,6 +12,7 @@ use std::time::Duration;
 use std::collections::VecDeque;
 
 pub mod stream;
+pub mod screen;
 
 pub struct Session {
 
@@ -46,9 +47,9 @@ impl Session {
         session.parser.options.support(tn_opt::TTYPE);
         session.parser.options.support(tn_opt::BINARY);
 
-        eprintln!("Negotiating...");
+        // eprintln!("Negotiating...");
         session.negotiate()?;
-        eprintln!("Negotiation complete.");
+        // eprintln!("Negotiation complete.");
         Ok(session)
     }
 
@@ -71,18 +72,18 @@ impl Session {
                         self.incoming_records.push_back(std::mem::replace(&mut self.cur_record, Vec::new())),
                     TelnetEvents::IAC(iac) => eprintln!("Unknown IAC {}", iac.command),
                     TelnetEvents::Negotiation(TelnetNegotiation { command: tn_cmd::WILL, option: tn_opt::TTYPE }) => {
-                        eprintln!("WILL ttype");
+                        // eprintln!("WILL ttype");
                         let sub = self.parser.subnegotiation(tn_opt::TTYPE, vec![1]);
                         if let Some(event) = sub {
-                            eprintln!("Sending subnegotiation");
+                            // eprintln!("Sending subnegotiation");
                             extra_events.push(event);
                         } else {
-                            eprintln!("Didn't do subnegotiation");
+                            // eprintln!("Didn't do subnegotiation");
                         }
 
                     }
                     TelnetEvents::Negotiation(TelnetNegotiation { command, option }) => {
-                        eprintln!("Negotiate: {}/{}", command, option);
+                        // eprintln!("Negotiate: {}/{}", command, option);
                         self.is_eor = self.option_state(tn_opt::EOR);
                         self.is_bin = self.option_state(tn_opt::BINARY);
                     }
@@ -108,7 +109,7 @@ impl Session {
             }
         }
 
-        eprintln!("Sending: {:?}", &sendbuf);
+        // eprintln!("Sending: {:?}", &sendbuf);
         self.stream.write_all(sendbuf.as_slice())?;
         Ok(())
     }
