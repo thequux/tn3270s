@@ -9,20 +9,21 @@ use libtelnet_rs::{
 use std::net::TcpStream;
 use std::io::{Write, Read};
 use std::time::Duration;
+use std::collections::VecDeque;
 
 pub mod stream;
 
 pub struct Session {
 
     parser: Parser,
-    ibuf: Vec<u8>,
-    obuf: Vec<u8>,
 
     stream: std::net::TcpStream,
 
     term_type: Option<Vec<u8>>,
     is_eor: bool,
     is_bin: bool,
+
+    incoming_records: VecDeque<Vec<u8>>,
     cur_record: Vec<u8>,
 }
 
@@ -32,8 +33,7 @@ impl Session {
     pub fn new(stream: TcpStream) -> Result<Self, Error> {
         let mut session = Session {
             parser: Parser::new(),
-            ibuf: Vec::new(),
-            obuf: Vec::new(),
+            incoming_records: VecDeque::new(),
             stream,
             term_type: None,
             is_bin: false,
@@ -57,10 +57,9 @@ impl Session {
         opt.local_state && opt.remote_state
     }
 
-    fn process_events(&mut self, mut events: Vec<TelnetEvents>) -> Result<Vec<Vec<u8>>, Error> {
+    fn process_events(&mut self, mut events: Vec<TelnetEvents>) -> Result<(), Error> {
         let mut extra_events = Vec::new();
         let mut sendbuf = Vec::new();
-        let mut records_in = Vec::new();
         while !events.is_empty() || !extra_events.is_empty() {
             events.append(&mut extra_events);
             extra_events.truncate(0);
@@ -69,7 +68,7 @@ impl Session {
                     TelnetEvents::DataSend(ref mut data) => sendbuf.append(data),
                     TelnetEvents::DataReceive(ref mut data) => self.cur_record.append(data),
                     TelnetEvents::IAC(TelnetIAC { command: tn_cmd::EOR }) =>
-                        records_in.push(std::mem::replace(&mut self.cur_record, Vec::new())),
+                        self.incoming_records.push_back(std::mem::replace(&mut self.cur_record, Vec::new())),
                     TelnetEvents::IAC(iac) => eprintln!("Unknown IAC {}", iac.command),
                     TelnetEvents::Negotiation(TelnetNegotiation { command: tn_cmd::WILL, option: tn_opt::TTYPE }) => {
                         eprintln!("WILL ttype");
@@ -110,8 +109,8 @@ impl Session {
         }
 
         eprintln!("Sending: {:?}", &sendbuf);
-        self.stream.write(sendbuf.as_slice())?;
-        Ok(records_in)
+        self.stream.write_all(sendbuf.as_slice())?;
+        Ok(())
     }
 
     fn is_ready(&self) -> bool {
@@ -154,5 +153,31 @@ impl Session {
         self.stream.write_all(send_data.as_slice())
     }
 
+
+    pub fn receive_record(&mut self, timeout: Option<Duration>) -> std::io::Result<Option<Vec<u8>>> {
+        if !self.incoming_records.is_empty() {
+            return Ok(self.incoming_records.pop_front());
+        }
+
+        self.stream.set_read_timeout(timeout)?;
+        let mut buf = vec![0; 1024];
+        let mut len = self.stream.read(buf.as_mut_slice())?;
+        if len != 0 {
+            self.stream.set_nonblocking(true)?;
+            while len != 0 {
+                let events = self.parser.receive(&buf[..len]);
+                self.process_events(events);
+                len = match self.stream.read(buf.as_mut_slice()) {
+                    Ok(len) => len,
+                    Err(err) if err.kind() == std::io::ErrorKind::WouldBlock => 0,
+                    Err(err) => return Err(err),
+                };
+            }
+            self.stream.set_nonblocking(false)?;
+        }
+
+        self.stream.set_read_timeout(None)?;
+        Ok(self.incoming_records.pop_front())
+    }
 }
 
