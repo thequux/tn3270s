@@ -1,8 +1,7 @@
 use structopt::StructOpt;
 use std::time::Duration;
 
-mod tn3270;
-mod encoding;
+use tn3270s::tn3270;
 
 #[derive(StructOpt)]
 pub struct Cli {
@@ -43,7 +42,9 @@ fn main() -> anyhow::Result<()> {
                 }
             };
 
-            run(session);
+            if let Err(err) = run(session) {
+                eprintln!("Error in session: {}", err);
+            }
 
         });
     }

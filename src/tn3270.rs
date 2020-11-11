@@ -7,7 +7,6 @@ use libtelnet_rs::{
     }
 };
 use std::net::TcpStream;
-use libtelnet_rs::telnet::op_option::EOR;
 use std::io::{Write, Read};
 use std::time::Duration;
 
@@ -124,14 +123,14 @@ impl Session {
         initial_negotiation.extend(self.parser._do(tn_opt::TTYPE));
         initial_negotiation.extend(self.parser._will(tn_opt::TTYPE));
 
-        self.process_events(initial_negotiation);
+        self.process_events(initial_negotiation)?;
 
         // Large enough for a TCP packet
         let mut idata = Vec::with_capacity(2000);
         idata.resize(idata.capacity(), 0);
 
         // Make sure that negotiation completes quickly
-        self.stream.set_read_timeout(Some(Duration::from_secs(5)));
+        self.stream.set_read_timeout(Some(Duration::from_secs(5)))?;
 
         while !self.is_ready() {
             let len = self.stream.read(&mut idata[..])?;
@@ -143,6 +142,7 @@ impl Session {
             self.process_events(events)?;
         }
 
+        self.stream.set_read_timeout(None)?;
         Ok(true)
 
     }

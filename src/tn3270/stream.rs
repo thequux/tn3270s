@@ -160,7 +160,7 @@ bitflags! {
 }
 
 #[derive(Copy, Clone, Debug, Hash)]
-enum Transparency {
+pub enum Transparency {
     Default,
     Or,
     Xor,
