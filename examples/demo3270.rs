@@ -36,17 +36,19 @@ fn run(mut session: tn3270::Session) -> anyhow::Result<()> {
             WriteOrder::SetBufferAddress(0),
             WriteOrder::EraseUnprotectedToAddress(bufsz.last_address()),
             WriteOrder::SetBufferAddress(bufsz.encode_address(1, 31)),
-            WriteOrder::StartFieldExtended(FieldAttribute::PROTECTED, vec![
+            WriteOrder::StartFieldExtended(vec![
+                ExtendedFieldAttribute::FieldAttribute(FieldAttribute::PROTECTED),
                 // ExtendedFieldAttribute::ForegroundColor(Color::Red),
             ]),
             WriteOrder::SendText("Hello from Rust!".into()),
             WriteOrder::SetBufferAddress(bufsz.encode_address(8, 21)),
-            WriteOrder::StartFieldExtended(FieldAttribute::INTENSE_SELECTOR_PEN_DETECTABLE, vec![]),
+            WriteOrder::StartField(FieldAttribute::INTENSE_SELECTOR_PEN_DETECTABLE),
             WriteOrder::SendText("        ".into()),
             WriteOrder::StartField(FieldAttribute::PROTECTED),
             WriteOrder::SetBufferAddress(bufsz.encode_address(8, 10)),
-            WriteOrder::StartFieldExtended(FieldAttribute::PROTECTED, vec![
-                ExtendedFieldAttribute::ForegroundColor(Color::Turquoise),
+            WriteOrder::StartFieldExtended(vec![
+                ExtendedFieldAttribute::FieldAttribute(FieldAttribute::PROTECTED),
+                // ExtendedFieldAttribute::ForegroundColor(Color::Turquoise),
             ]),
             WriteOrder::SendText("Name:".into()),
         ],
@@ -54,7 +56,8 @@ fn run(mut session: tn3270::Session) -> anyhow::Result<()> {
 
     for (i, line) in rust_logo.iter().enumerate() {
         record.orders.push(WriteOrder::SetBufferAddress(bufsz.encode_address(3+i as u16, 31)));
-        record.orders.push(WriteOrder::StartFieldExtended(FieldAttribute::PROTECTED, vec![
+        record.orders.push(WriteOrder::StartFieldExtended(vec![
+            ExtendedFieldAttribute::FieldAttribute(FieldAttribute::PROTECTED),
             ExtendedFieldAttribute::ForegroundColor(Color::Red),
         ]));
         record.orders.push(WriteOrder::SendText((*line).into()));
@@ -68,13 +71,25 @@ fn run(mut session: tn3270::Session) -> anyhow::Result<()> {
 
     let record = session.receive_record(None)?;
     if let Some(record) = record {
-        eprintln!("Incoming record: {:?}", hex::encode(record));
+        eprintln!("Incoming record: {:?}", hex::encode(&record));
+        eprintln!("Decoded: {:#?}", IncomingRecord::parse_record(record.as_slice()))
     } else {
         eprintln!("No record");
     }
 
+    session.send_record(&WriteCommand{
+        command: WriteCommandCode::Write,
+        wcc: WCC::RESET_MDT,
+        orders: vec![
+            WriteOrder::SetBufferAddress(bufsz.encode_address(8,21)),
+            WriteOrder::ModifyField(vec![
+                ExtendedFieldAttribute::FieldAttribute(FieldAttribute::PROTECTED),
+            ]),
+        ],
+    })?;
 
-    std::thread::sleep(Duration::from_secs(5));
+
+    std::thread::sleep(Duration::from_secs(50));
     Ok(())
 }
 

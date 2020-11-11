@@ -1,12 +1,18 @@
 use bitflags::bitflags;
 use std::io::Write;
-use std::convert::TryFrom;
-use snafu::Snafu;
+use std::convert::{TryFrom, TryInto};
+use snafu::{Snafu, ensure};
+use hex::encode;
+use std::fs::read_to_string;
 
 #[derive(Clone, Debug, Snafu)]
 pub enum StreamFormatError {
     #[snafu(display("Invalid AID: {:02x}", aid))]
-    InvalidAID { aid: u8, }
+    InvalidAID { aid: u8, },
+    #[snafu(display("Record ended early"))]
+    UnexpectedEOR,
+    #[snafu(display("Invalid data"))]
+    InvalidData,
 }
 
 const WCC_TRANS: [u8; 64] = [
@@ -35,12 +41,15 @@ bitflags! {
 
 bitflags! {
     pub struct FieldAttribute: u8 {
+        const HI_1 = 0x40;
+        const HI_2 = 0x80;
         const PROTECTED = 0x20;
         const NUMERIC = 0x10;
         const NON_DISPLAY = 0x0C;
         const DISPLAY_SELECTOR_PEN_DETECTABLE = 0x04;
         const INTENSE_SELECTOR_PEN_DETECTABLE = 0x08;
         const MODIFIED = 0x01;
+        const NONE = 0x00;
     }
 }
 
@@ -138,24 +147,60 @@ impl Into<u8> for Color {
     }
 }
 
+impl TryFrom<u8> for Color {
+    type Error = StreamFormatError;
+
+    fn try_from(value: u8) -> Result<Self, Self::Error> {
+        Ok(match value {
+            0x00 => Color::Default,
+            0xF0 => Color::NeutralBG,
+            0xF1 => Color::Blue,
+            0xF2 => Color::Red,
+            0xF3 => Color::Pink,
+            0xF4 => Color::Green,
+            0xF5 => Color::Turquoise,
+            0xF6 => Color::Yellow,
+            0xF7 => Color::NeutralFG,
+            0xF8 => Color::Black,
+            0xF9 => Color::DeepBlue,
+            0xFA => Color::Orange,
+            0xFB => Color::Purple,
+            0xFC => Color::PaleGreen,
+            0xFD => Color::PaleTurquoise,
+            0xFE => Color::Grey,
+            0xFF => Color::White,
+            _ => return Err(StreamFormatError::InvalidData),
+        })
+    }
+}
+
 #[derive(Copy, Clone, Debug, Hash)]
 pub enum Highlighting {
-    Default,
-    Normal,
-    Blink,
-    Reverse,
-    Underscore,
+    Default = 0x00,
+    Normal = 0xF0,
+    Blink = 0xF1,
+    Reverse = 0xF2,
+    Underscore = 0xF4,
+}
+
+impl TryFrom<u8> for Highlighting {
+    type Error = StreamFormatError;
+
+    fn try_from(v: u8) -> Result<Self, Self::Error> {
+        Ok(match v {
+            0x00 => Highlighting::Default,
+            0xF0 => Highlighting::Normal,
+            0xF1 => Highlighting::Blink,
+            0xF2 => Highlighting::Reverse,
+            0xF4 => Highlighting::Underscore,
+            _ => return Err(StreamFormatError::InvalidData)
+        })
+    }
 }
 
 impl Into<u8> for Highlighting {
     fn into(self) -> u8 {
-        match self {
-            Highlighting::Default => 0x00,
-            Highlighting::Normal => 0xF0,
-            Highlighting::Blink => 0xF1,
-            Highlighting::Reverse => 0xF2,
-            Highlighting::Underscore => 0xF4,
-        }
+        self as u8
     }
 }
 
@@ -177,14 +222,28 @@ pub enum Transparency {
     Opaque,
 }
 
-impl Into<u8> for Transparency {
-    fn into(self) -> u8 {
-        match self {
+impl From<Transparency> for u8 {
+    fn from(v: Transparency) -> u8 {
+        match v {
             Transparency::Default => 0x00,
             Transparency::Or => 0xF0,
             Transparency::Xor => 0xF1,
             Transparency::Opaque => 0xF2,
         }
+    }
+}
+
+impl TryFrom<u8> for Transparency {
+    type Error = StreamFormatError;
+
+    fn try_from(value: u8) -> Result<Self, Self::Error> {
+        Ok(match value {
+            0x00 => Transparency::Default,
+            0xF0 => Transparency::Or,
+            0xF1 => Transparency::Xor,
+            0xF2 => Transparency::Opaque,
+            _ => return Err(StreamFormatError::InvalidData)
+        })
     }
 }
 
@@ -207,7 +266,27 @@ pub enum ExtendedFieldAttribute {
     FieldAttribute(FieldAttribute),
     FieldValidation(FieldValidation),
     FieldOutlining(FieldOutline),
+}
 
+impl TryFrom<&[u8]> for ExtendedFieldAttribute {
+    type Error = StreamFormatError;
+
+    fn try_from(value: &[u8]) -> Result<Self, Self::Error> {
+        ensure!(value.len() == 2, UnexpectedEOR);
+        Ok(match (value[0], value[1]) {
+            (0x00, 0x00) => ExtendedFieldAttribute::AllAttributes,
+            (0x00, _) => return Err(StreamFormatError::InvalidData),
+            (0xC0, fa) => ExtendedFieldAttribute::FieldAttribute(FieldAttribute::from_bits(fa & 0x3F).ok_or(StreamFormatError::InvalidData)?),
+            (0x41, v) => ExtendedFieldAttribute::ExtendedHighlighting(v.try_into()?),
+            (0x45, v) => ExtendedFieldAttribute::BackgroundColor(v.try_into()?),
+            (0x42, v) => ExtendedFieldAttribute::ForegroundColor(v.try_into()?),
+            (0x43, v) => ExtendedFieldAttribute::CharacterSet(v),
+            (0xC2, v) => ExtendedFieldAttribute::FieldOutlining(FieldOutline::from_bits(v).ok_or(StreamFormatError::InvalidData)?),
+            (0x46, v) => ExtendedFieldAttribute::Transparency(v.try_into()?),
+            (0xC1, v) => ExtendedFieldAttribute::FieldValidation(FieldValidation::from_bits(v).ok_or(StreamFormatError::InvalidData)?),
+            _ => return Err(StreamFormatError::InvalidData),
+        })
+    }
 }
 
 impl ExtendedFieldAttribute {
@@ -257,7 +336,8 @@ impl BufferAddressCalculator {
 #[derive(Clone, Debug)]
 pub enum WriteOrder {
     StartField(FieldAttribute),
-    StartFieldExtended(FieldAttribute, Vec<ExtendedFieldAttribute>),
+    /// The list of attributes MUST include a FieldAttribute
+    StartFieldExtended(Vec<ExtendedFieldAttribute>),
     SetBufferAddress(u16),
     SetAttribute(ExtendedFieldAttribute),
     ModifyField(Vec<ExtendedFieldAttribute>),
@@ -274,10 +354,9 @@ impl WriteOrder {
     pub fn serialize(&self, output: &mut Vec<u8>) {
         match self {
             WriteOrder::StartField(attr) => output.extend_from_slice(&[0x1D, attr.bits()]),
-            WriteOrder::StartFieldExtended(attr, rest) => {
-                output.extend_from_slice(&[0x29, rest.len() as u8 + 1]);
-                ExtendedFieldAttribute::FieldAttribute(*attr).encode_into(&mut* output);
-                for attr in rest {
+            WriteOrder::StartFieldExtended(attrs) => {
+                output.extend_from_slice(&[0x29, attrs.len() as u8]);
+                for attr in attrs {
                     attr.encode_into(&mut *output);
                 }
             }
@@ -329,6 +408,7 @@ impl Into<Vec<u8>> for &WriteCommand {
 }
 
 #[repr(u8)]
+#[derive(Debug, Copy, Clone, Ord, PartialOrd, Eq, PartialEq, Hash)]
 pub enum AID {
     NoAIDGenerated,
     NoAIDGeneratedPrinter,
@@ -466,5 +546,136 @@ impl TryFrom<u8> for AID {
             0xE7 => MagReaderNumber,
             _ => return Err(StreamFormatError::InvalidAID { aid }),
         })
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct IncomingRecord {
+    pub aid: AID,
+    pub addr: u16,
+    pub orders: Vec<WriteOrder>,
+}
+
+fn parse_addr(encoded: &[u8]) -> Result<u16, StreamFormatError> {
+    match encoded[0] >> 6 {
+        0b00 => Ok(((encoded[0] as u16) << 8) + encoded[1] as u16),
+        0b01 | 0b11 => {
+            Ok((encoded[0] as u16 & 0x3F) << 6 | (encoded[1] as u16 & 0x3F))
+        }
+        _ => Err(StreamFormatError::InvalidData),
+    }
+}
+
+impl IncomingRecord {
+    pub fn parse_record(mut record: &[u8]) -> Result<Self, StreamFormatError> {
+        if record.len() < 3 {
+            return Err(StreamFormatError::UnexpectedEOR);
+        }
+
+        let aid = AID::try_from(record[0])?;
+        // TODO: Handle AID 88 structured fields
+        let addr = parse_addr(&record[1..3])?;
+
+        let mut result = Self {
+            aid,
+            addr,
+            orders: vec![]
+        };
+
+        record = &record[3..];
+
+        while record.len() > 0 {
+            match record[0] {
+                0x1D => {
+                    ensure!(record.len() >= 2, UnexpectedEOR);
+                    result.orders.push(
+                        WriteOrder::StartField(FieldAttribute::from_bits(record[1] & 0x3F)
+                            .ok_or(StreamFormatError::InvalidData)?));
+                    record = &record[2..];
+
+                },
+                0x29 => {
+                    ensure!(record.len() >= 2, UnexpectedEOR);
+                    let (header, body) = record.split_at(2);
+                    let count = header[1] as usize;
+                    ensure!(body.len() >= count * 2, UnexpectedEOR);
+                    let (attrs, rest) = body.split_at(2 * count);
+                    record = rest;
+
+                    result.orders.push(
+                        WriteOrder::StartFieldExtended(
+                            attrs.chunks(2)
+                            .map(ExtendedFieldAttribute::try_from)
+                                .collect::<Result<Vec<ExtendedFieldAttribute>, StreamFormatError>>()?
+                        )
+                    )
+                }
+                0x11 => {
+                    ensure!(record.len() >= 3, UnexpectedEOR);
+                    result.orders.push(WriteOrder::SetBufferAddress(parse_addr(&record[1..3])?));
+                    record = &record[3..];
+                }
+                0x28 => {
+                    ensure!(record.len() >= 3, UnexpectedEOR);
+                    result.orders.push(WriteOrder::SetAttribute(ExtendedFieldAttribute::try_from(&record[1..3])?));
+                    record = &record[3..];
+                }
+                0x2C => {
+                    ensure!(record.len() >= 2, UnexpectedEOR);
+                    let (header, body) = record.split_at(2);
+                    let count = header[1] as usize;
+                    ensure!(body.len() >= count * 2, UnexpectedEOR);
+                    let (attrs, rest) = body.split_at(2 * count);
+                    record = rest;
+
+                    result.orders.push(
+                        WriteOrder::ModifyField(
+                            attrs.chunks(2)
+                                .map(ExtendedFieldAttribute::try_from)
+                                .collect::<Result<Vec<ExtendedFieldAttribute>, StreamFormatError>>()?
+                        )
+                    )
+                }
+                0x13 => {
+                    ensure!(record.len() >= 3, UnexpectedEOR);
+                    result.orders.push(WriteOrder::InsertCursor(parse_addr(&record[1..3])?));
+                    record = &record[3..];
+                }
+                0x05 => {
+                    result.orders.push(WriteOrder::ProgramTab);
+                    record = &record[1..];
+                }
+                0x3C => {
+                    ensure!(record.len() >= 4, UnexpectedEOR);
+                    // TODO: Handle graphic escape properly
+                    result.orders.push(WriteOrder::RepeatToAddress(
+                        parse_addr(&record[1..3])?,
+                        crate::encoding::cp037::DECODE_TBL[record[4] as usize] as char,
+                    ));
+                    record = &record[4..]
+                }
+                0x12 => {
+                    ensure!(record.len() >= 3, UnexpectedEOR);
+                    result.orders.push(WriteOrder::EraseUnprotectedToAddress(parse_addr(&record[1..3])?));
+                    record = &record[3..];
+                }
+                0x08 => {
+                    ensure!(record.len() >= 2, UnexpectedEOR);
+                    result.orders.push(WriteOrder::GraphicEscape(record[2]));
+                    record = &record[2..];
+                }
+                0x40..=0xFF => {
+                    let len = record.iter().position(|&v| v < 0x40).unwrap_or(record.len());
+                    let data = record[..len]
+                        .iter()
+                        .map(|&v| crate::encoding::cp037::DECODE_TBL[v as usize] as char)
+                        .collect();
+                    result.orders.push(WriteOrder::SendText(data));
+                    record = &record[len..];
+                },
+                _ => return Err(StreamFormatError::InvalidData)
+            }
+        }
+        Ok(result)
     }
 }
